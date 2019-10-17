@@ -1,3 +1,140 @@
+moving pictures 
 
-https://www.jianshu.com/p/4fb4e628ed07
-http://blog.sciencenet.cn/home.php?mod=space&uid=3406804&do=blog&id=1179809
+#!/bin/sh
+# cczhu 16/10/2019 
+# qiime2-2019.7 moving pictures example 
+# 数据导入（emp格式）
+bsub -K -J import -n 1 -R span[hosts=1] -o %J.out -q normal "qiime tools import \
+  --type EMPSingleEndSequences \
+  --input-path emp-single-end-sequences \
+  --output-path emp-single-end-sequences.qza"
+
+# 通过barcode拆分数据 一般公司下机数据都是clean 不需要拆分
+bsub -K -J demux -n 1 -R span[hosts=1] -o %J.out -q normal "time qiime demux emp-single \
+  --i-seqs emp-single-end-sequences.qza \
+  --m-barcodes-file sample-metadata.tsv \
+  --m-barcodes-column barcode-sequence \
+  --o-per-sample-sequences demux.qza \
+  --o-error-correction-details demux-details.qza"  
+ 
+# demux qzv
+bsub -K -J demux.qzv -n 1 -R span[hosts=1] -q normal "time qiime demux summarize \
+  --i-data demux.qza \
+  --o-visualization demux.qzv"
+
+# 拆分后的数据通过dada2质控生成特征表和代表序列 qiime2推荐使用dada2 还有deblur选择
+bsub -K -J dada2 -n 1 -R span[hosts=1] -q normal "time qiime dada2 denoise-single \
+  --i-demultiplexed-seqs demux.qza \
+  --p-trim-left 0 \
+  --p-trunc-len 120 \
+  --o-representative-sequences rep-seqs-dada2.qza \
+  --o-table table-dada2.qza \
+  --o-denoising-stats stats-dada2.qza"
+ 
+# stat-dada2 qzv
+bsub -K -J dada2.qzv -n 1 -R span[hosts=1] -q normal "qiime metadata tabulate \
+  --m-input-file stats-dada2.qza \
+  --o-visualization stats-dada2.qzv"
+ 
+# feature-table qzv
+bsub -K -J vis -n 1 -R span[hosts=1] -o %J.out -q normal "qiime feature-table summarize \
+  --i-table table.qza \
+  --o-visualization table.qzv \
+  --m-sample-metadata-file sample-metadata.tsv"
+
+# rep-seqs qzv
+bsub -K -J vis -n 1 -R span[hosts=1] -q normal "qiime feature-table tabulate-seqs \
+  --i-data rep-seqs.qza \
+  --o-visualization rep-seqs.qzv"
+ 
+# 通过代表性序列建树
+bsub -J tree1 -n 1 -R span[hosts=1] -q normal -o %J.out "qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza"
+
+# 通过有根树得到核心多样性数据 454抽平1000左右 现在都是3w-5w
+bsub -J core-diversity -n 1 -R span[hosts=1] -q normal -o %J.out 'qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table table.qza \
+  --p-sampling-depth 1103 \
+  --m-metadata-file sample-metadata.tsv \
+  --output-dir core-metrics-results'
+
+# faith-pd qzv
+bsub -J diversity-vis -n 1 -R span[hosts=1] -q normal -o %J.out 'qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --o-visualization core-metrics-results/faith-pd-group-significance.qzv'
+
+# PREMANOVA beta-diversity (pairwise成对检验)
+bsub -J diversity-vis -n 1 -R span[hosts=1] -q normal -o %J.out 'qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column body-site \
+  --o-visualization core-metrics-results/unweighted-unifrac-body-site-significance.qzv \
+  --p-pairwise'
+  
+# bc距离PCoA (--p-custom-axes 探索时间序列数据十分有用)
+bsub -J diversity-vis -n 1 -R span[hosts=1] -q normal 'qiime emperor plot \
+  --i-pcoa core-metrics-results/bray_curtis_pcoa_results.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --p-custom-axes days-since-experiment-start \
+  --o-visualization core-metrics-results/bray-curtis-emperor-days-since-experiment-start.qzv'
+  
+# 下载物种注释信息
+wget \
+  -O "gg-13-8-99-515-806-nb-classifier.qza" \
+  "https://data.qiime2.org/2019.7/common/gg-13-8-99-515-806-nb-classifier.qza"
+
+# 物种注释和可视化
+bsub -J taxa-classification -n 1 -R span[hosts=1] -q normal 'qiime feature-classifier classify-sklearn \
+  --i-classifier gg-13-8-99-515-806-nb-classifier.qza \
+  --i-reads rep-seqs.qza \
+  --o-classification taxonomy.qza'
+bsub -J classification-vis -n 1 -R span[hosts=1] -q normal 'qiime metadata tabulate \
+  --m-input-file taxonomy.qza \
+  --o-visualization taxonomy.qzv'
+
+# 条形图看样本的分类组成 一般看2门 和 6属
+bsub -J taxa-plot -n 1 -R span[hosts=1] -q normal 'qiime taxa barplot \
+  --i-table table.qza \
+  --i-taxonomy taxonomy.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --o-visualization taxa-bar-plots.qzv'
+  
+# ANCOM差异分析
+bsub -J ANCOM -n 1 -R span[hosts=1] -q normal "qiime feature-table filter-samples \
+  --i-table table.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --p-where "[body-site]='gut'" \
+  --o-filtered-table gut-table.qza"
+
+# 将结果去0 ancom不能容忍0
+bsub -J ANCOM-0 -n 1 -R span[hosts=1] -q normal 'qiime composition add-pseudocount \
+  --i-table gut-table.qza \
+  --o-composition-table comp-gut-table.qza'
+  
+# ANCOM
+bsub -J ANCOM-vis -n 1 -R span[hosts=1] -q normal 'qiime composition ancom \
+  --i-table comp-gut-table.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column subject \
+  --o-visualization ancom-subject.qzv'
+  
+# 折叠到属水平 然后进行ANCOM
+bsub -J ANCOM-vis -n 1 -R span[hosts=1] -q normal 'qiime composition ancom \
+  --i-table comp-gut-table-l6.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column subject \
+  --o-visualization l6-ancom-subject.qzv'
+
+bsub -J ANCOM-vis -n 1 -R span[hosts=1] -q normal -o err.out 'qiime composition add-pseudocount \
+  --i-table gut-table-l6.qza \
+  --o-composition-table comp-gut-table-l6.qza && qiime composition ancom \
+  --i-table comp-gut-table-l6.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column subject \
+  --o-visualization l6-ancom-subject.qzv'
